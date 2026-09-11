@@ -168,7 +168,6 @@ class VeloxShuffleReaderTest : public ::testing::Test, public test::VectorTestBa
   }
 
   std::shared_ptr<VeloxRssSortShuffleReaderDeserializer> makeDeserializer(std::shared_ptr<arrow::io::InputStream> in) {
-    int64_t deserializeTime = 0;
     auto streamReader = std::make_shared<TestStreamReader>(std::move(in));
     return std::make_shared<VeloxRssSortShuffleReaderDeserializer>(
         streamReader,
@@ -176,8 +175,10 @@ class VeloxShuffleReaderTest : public ::testing::Test, public test::VectorTestBa
         ROW({"c0"}, {INTEGER()}),
         /*batchSize=*/1024,
         common::CompressionKind_NONE,
-        deserializeTime);
+        deserializeTime_);
   }
+
+  int64_t deserializeTime_{0};
 };
 
 // Empty stream (e.g. an empty Celeborn partition): construction must NOT
