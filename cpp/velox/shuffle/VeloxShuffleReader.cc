@@ -862,8 +862,7 @@ bool VeloxRssSortShuffleReaderDeserializer::VeloxInputStream::hasNext() {
 void VeloxRssSortShuffleReaderDeserializer::VeloxInputStream::next(bool throwIfPastEnd) {
   const uint32_t readBytes = buffer_->capacity();
   offset_ = 0;
-  int64_t realBytes = in_->Read(readBytes, buffer_->asMutable<char>()).ValueOr(0);
-  VELOX_CHECK_LE(0, realBytes, "Read returned negative value: {}", realBytes);
+  GLUTEN_ASSIGN_OR_THROW(int64_t realBytes, in_->Read(readBytes, buffer_->asMutable<char>()));
   if (realBytes > 0) {
     offset_ = realBytes;
     setRange({buffer_->asMutable<uint8_t>(), static_cast<int32_t>(realBytes), 0});

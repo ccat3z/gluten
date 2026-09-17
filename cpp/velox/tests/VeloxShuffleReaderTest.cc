@@ -22,7 +22,7 @@
 // Covers:
 // - graceful EOS on an empty stream (e.g. an empty Celeborn partition);
 // - EOS hit mid-page on a truncated compressed page;
-// - a buggy upstream whose Read() returns a negative byte count;
+// - a buggy upstream whose Read() returns an error status;
 //
 
 #include <gtest/gtest.h>
@@ -56,9 +56,8 @@ namespace gluten {
 
 namespace {
 // A minimal arrow::io::InputStream backed by a fixed in-memory payload. Once
-// the payload is exhausted, Read returns 0 (EOS). With `negativeRead`, Read
-// always returns -1 instead, modeling a buggy upstream that reports EOF as a
-// negative byte count.
+// the payload is exhausted, Read returns 0 (EOS). With `errorRead`, Read
+// returns an IOError instead, modeling a buggy upstream that fails the read.
 //
 // To keep a possible reader-side infinite loop (readBytes -> next() -> EOS ->
 // silently return -> spin) from hanging the test until the CI timeout, Read
@@ -66,8 +65,8 @@ namespace {
 // readers probe EOS only a couple of times, so the cap never trips for them.
 class FakeInputStream final : public arrow::io::InputStream {
  public:
-  explicit FakeInputStream(std::vector<uint8_t> payload = {}, bool negativeRead = false)
-      : payload_(std::move(payload)), negativeRead_(negativeRead) {}
+  explicit FakeInputStream(std::vector<uint8_t> payload = {}, bool errorRead = false)
+      : payload_(std::move(payload)), errorRead_(errorRead) {}
 
   arrow::Status Close() override {
     closed_ = true;
@@ -81,8 +80,8 @@ class FakeInputStream final : public arrow::io::InputStream {
   }
 
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
-    if (negativeRead_) {
-      return static_cast<int64_t>(-1);
+    if (errorRead_) {
+      return arrow::Status::IOError("fake upstream read failure");
     }
     int64_t toRead = std::min<int64_t>(nbytes, static_cast<int64_t>(payload_.size()) - pos_);
     if (toRead > 0) {
@@ -90,9 +89,9 @@ class FakeInputStream final : public arrow::io::InputStream {
       pos_ += toRead;
       consecutiveEosReads_ = 0;
     } else if (++consecutiveEosReads_ > kMaxConsecutiveEosReads) {
-      // Throw a plain C++ exception: the reader wraps Read() in
-      // arrow::Result and drops arrow errors via .ValueOr(0), so an
-      // arrow::Status::IOError would be swallowed and the loop would spin on.
+      // Throw a plain C++ exception as a loop guard: the EOS contract itself
+      // must not be an error (a clean 0 return is legitimate), so this is the
+      // only way to cut a possible spin short.
       throw std::runtime_error(
           "possible infinite loop: Read() returned 0 for " + std::to_string(kMaxConsecutiveEosReads) +
           " consecutive calls");
@@ -113,7 +112,7 @@ class FakeInputStream final : public arrow::io::InputStream {
 
   std::vector<uint8_t> payload_;
   int64_t pos_{0};
-  bool negativeRead_{false};
+  bool errorRead_{false};
   int32_t consecutiveEosReads_{0};
   bool closed_{false};
 };
@@ -201,15 +200,12 @@ TEST_F(VeloxShuffleReaderTest, EosMidPageThrows) {
       deserializer->next(), "Reading past end of VeloxRssSortShuffleReaderDeserializer::VeloxInputStream");
 }
 
-// A buggy upstream whose Read returns a negative byte count. Without a
-// signed-result guard the negative value would implicitly convert to a huge
-// uint64_t offset_ and corrupt setRange / loop forever. With the guard it
-// fails fast during the probe-read.
-TEST_F(VeloxShuffleReaderTest, NegativeReadThrows) {
-  // A buggy upstream whose Read returns a negative byte count
-  auto deserializer =
-      makeDeserializer(std::make_shared<FakeInputStream>(std::vector<uint8_t>{}, /*negativeRead=*/true));
-  VELOX_ASSERT_THROW(deserializer->next(), "Read returned negative value");
+// A buggy upstream whose Read returns an error status. The reader must
+// propagate it instead of swallowing it.
+TEST_F(VeloxShuffleReaderTest, ErrorReadThrows) {
+  auto deserializer = makeDeserializer(std::make_shared<FakeInputStream>(std::vector<uint8_t>{}, /*errorRead=*/true));
+
+  EXPECT_THROW((void)deserializer->next(), GlutenException);
 }
 
 } // namespace gluten
